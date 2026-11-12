@@ -9,9 +9,6 @@ namespace ArknightsCursorTool;
 
 internal sealed class CursorMappingController : IDisposable
 {
-    private const int ActivePollMilliseconds = 8;
-    private const int CursorOutsidePollMilliseconds = 16;
-    private const int IdlePollMilliseconds = 100;
     private readonly string _gameRoot;
     private readonly Action<string> _log;
     private readonly Cursor _cursor;
@@ -50,7 +47,7 @@ internal sealed class CursorMappingController : IDisposable
         {
             IsBackground = true,
             Name = "Arknights cursor mapper",
-            Priority = ThreadPriority.BelowNormal
+            Priority = ThreadPriority.Normal
         };
         _worker.Start();
     }
@@ -95,6 +92,7 @@ internal sealed class CursorMappingController : IDisposable
         var cachedIsGame = false;
         var cachedProcessDescription = "";
         var lastStateMessage = "";
+        var timerResolutionRequested = TimeBeginPeriod(1) == 0;
 
         void LogStateIfChanged(string message)
         {
@@ -141,7 +139,7 @@ internal sealed class CursorMappingController : IDisposable
                     DetachAndRestore(currentThreadId, ref attachedGameThreadId, ref hideCalls);
                     var title = GetWindowTitle(foreground);
                     LogStateIfChanged($"等待所選遊戲視窗：前景程序資訊「{cachedProcessDescription}」，視窗標題「{title}」。");
-                    WaitForStopOrTimeout(IdlePollMilliseconds);
+                    Thread.Sleep(4);
                     continue;
                 }
 
@@ -150,7 +148,7 @@ internal sealed class CursorMappingController : IDisposable
                     HideOverlay(ref overlayVisible);
                     DetachAndRestore(currentThreadId, ref attachedGameThreadId, ref hideCalls);
                     LogStateIfChanged("遊戲視窗已在前景，但指標位於客戶區外；移入遊戲畫面後會套用映射。");
-                    WaitForStopOrTimeout(CursorOutsidePollMilliseconds);
+                    Thread.Sleep(4);
                     continue;
                 }
 
@@ -165,7 +163,7 @@ internal sealed class CursorMappingController : IDisposable
                     if (gameThreadId == attachFailedThreadId && now < retryAttachAfter)
                     {
                         HideOverlay(ref overlayVisible);
-                        WaitForStopOrTimeout(IdlePollMilliseconds);
+                        Thread.Sleep(4);
                         continue;
                     }
 
@@ -175,7 +173,7 @@ internal sealed class CursorMappingController : IDisposable
                         retryAttachAfter = now + TimeSpan.FromSeconds(2);
                         HideOverlay(ref overlayVisible);
                         LogStateIfChanged($"無法連接遊戲輸入執行緒（Win32 {Marshal.GetLastWin32Error()}）；請確認工具與遊戲使用相同權限。");
-                        WaitForStopOrTimeout(IdlePollMilliseconds);
+                        Thread.Sleep(4);
                         continue;
                     }
 
@@ -196,7 +194,7 @@ internal sealed class CursorMappingController : IDisposable
                         LogStateIfChanged($"無法更新映射游標視窗（Win32 {Marshal.GetLastWin32Error()}）；已恢復原指標，稍後重試。");
                         HideOverlay(ref overlayVisible);
                         DetachAndRestore(currentThreadId, ref attachedGameThreadId, ref hideCalls);
-                        WaitForStopOrTimeout(IdlePollMilliseconds);
+                        Thread.Sleep(4);
                         continue;
                     }
                     overlayVisible = true;
@@ -211,7 +209,7 @@ internal sealed class CursorMappingController : IDisposable
                     lastRenderedFrame = frame;
                 }
 
-                WaitForStopOrTimeout(ActivePollMilliseconds);
+                Thread.Sleep(1);
             }
         }
         catch (Exception ex)
@@ -222,6 +220,7 @@ internal sealed class CursorMappingController : IDisposable
         {
             HideOverlay(ref overlayVisible);
             DetachAndRestore(currentThreadId, ref attachedGameThreadId, ref hideCalls);
+            if (timerResolutionRequested) _ = TimeEndPeriod(1);
         }
     }
 
@@ -330,8 +329,6 @@ internal sealed class CursorMappingController : IDisposable
         visible = false;
     }
 
-    private bool WaitForStopOrTimeout(int milliseconds) => _stop.Token.WaitHandle.WaitOne(milliseconds);
-
     private const int SwHide = 0;
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const int SwpNoSize = 0x0001;
@@ -354,6 +351,9 @@ internal sealed class CursorMappingController : IDisposable
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] private static extern bool PeekMessage(out NativeMessage message, IntPtr hwnd, uint min, uint max, uint remove);
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")] private static extern uint TimeBeginPeriod(uint period);
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")] private static extern uint TimeEndPeriod(uint period);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint(int x, int y)
     {
@@ -400,8 +400,6 @@ internal sealed class CursorOverlayWindow : Form
     private readonly Cursor _cursor;
     private readonly AniCursorAnimation? _animation;
     private readonly Size _renderSize;
-    private Bitmap? _renderBitmap;
-    private Graphics? _renderGraphics;
     public int HotSpotX { get; }
     public int HotSpotY { get; }
 
@@ -438,43 +436,58 @@ internal sealed class CursorOverlayWindow : Form
     }
 
     public void InitializeLayeredImage()
-    {
-        _renderBitmap = new Bitmap(_renderSize.Width, _renderSize.Height, PixelFormat.Format32bppPArgb);
-        _renderGraphics = Graphics.FromImage(_renderBitmap);
-        RenderFrame(GetFrameIndex(TimeSpan.Zero));
-    }
+        => RenderFrame(GetFrameIndex(TimeSpan.Zero));
 
     public int GetFrameIndex(TimeSpan elapsed) => _animation?.GetFrameIndex(elapsed) ?? 0;
 
     public void RenderFrame(int frameIndex)
     {
-        var graphics = _renderGraphics ?? throw new InvalidOperationException("映射游標點陣圖尚未初始化。");
-        graphics.Clear(Color.Transparent);
-        var graphicsHandle = graphics.GetHdc();
+        using var bitmap = new Bitmap(_renderSize.Width, _renderSize.Height, PixelFormat.Format32bppPArgb);
+        using (var graphics = Graphics.FromImage(bitmap))
+        {
+            graphics.Clear(Color.Transparent);
+            var graphicsHandle = graphics.GetHdc();
+            try
+            {
+                if (!DrawIconEx(graphicsHandle, 0, 0, _cursor.Handle, _renderSize.Width, _renderSize.Height, (uint)frameIndex, IntPtr.Zero, DiNormal))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "無法繪製 Windows 指標畫格。");
+            }
+            finally { graphics.ReleaseHdc(graphicsHandle); }
+        }
+
+        var screenDc = GetDC(IntPtr.Zero);
+        if (screenDc == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "無法取得映射游標畫面。");
         try
         {
-            if (!DrawIconEx(graphicsHandle, 0, 0, _cursor.Handle, _renderSize.Width, _renderSize.Height, (uint)frameIndex, IntPtr.Zero, DiNormal))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "無法繪製 Windows 指標畫格。");
-
-            var source = new NativePoint(0, 0);
-            var size = new NativeSize(_renderSize.Width, _renderSize.Height);
-            var blend = new BlendFunction { Operation = AcSrcOver, SourceConstantAlpha = 255, AlphaFormat = AcSrcAlpha };
-            if (!UpdateLayeredWindow(Handle, IntPtr.Zero, IntPtr.Zero, ref size, graphicsHandle, ref source, 0, ref blend, UlwAlpha))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "無法更新透明映射游標。");
+            var memoryDc = CreateCompatibleDC(screenDc);
+            if (memoryDc == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "無法建立映射游標記憶體畫面。");
+            try
+            {
+                var bitmapHandle = bitmap.GetHbitmap(Color.FromArgb(0));
+                if (bitmapHandle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "無法建立映射游標點陣圖。");
+                var oldBitmap = SelectObject(memoryDc, bitmapHandle);
+                if (oldBitmap == IntPtr.Zero || oldBitmap == new IntPtr(-1))
+                {
+                    _ = DeleteObject(bitmapHandle);
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "無法選取映射游標點陣圖。");
+                }
+                try
+                {
+                    var source = new NativePoint(0, 0);
+                    var size = new NativeSize(_renderSize.Width, _renderSize.Height);
+                    var blend = new BlendFunction { Operation = AcSrcOver, SourceConstantAlpha = 255, AlphaFormat = AcSrcAlpha };
+                    if (!UpdateLayeredWindow(Handle, screenDc, IntPtr.Zero, ref size, memoryDc, ref source, 0, ref blend, UlwAlpha))
+                        throw new Win32Exception(Marshal.GetLastWin32Error(), "無法更新透明映射游標。");
+                }
+                finally
+                {
+                    _ = SelectObject(memoryDc, oldBitmap);
+                    _ = DeleteObject(bitmapHandle);
+                }
+            }
+            finally { _ = DeleteDC(memoryDc); }
         }
-        finally { graphics.ReleaseHdc(graphicsHandle); }
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            _renderGraphics?.Dispose();
-            _renderGraphics = null;
-            _renderBitmap?.Dispose();
-            _renderBitmap = null;
-        }
-        base.Dispose(disposing);
+        finally { _ = ReleaseDC(IntPtr.Zero, screenDc); }
     }
 
     protected override void WndProc(ref Message message)
@@ -489,6 +502,12 @@ internal sealed class CursorOverlayWindow : Form
 
     [DllImport("user32.dll", SetLastError = true)] private static extern bool DrawIconEx(IntPtr dc, int x, int y, IntPtr icon, int width, int height, uint stepIfAnimated, IntPtr flickerFreeBrush, uint flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr destinationDc, IntPtr destination, ref NativeSize size, IntPtr sourceDc, ref NativePoint source, int colorKey, ref BlendFunction blend, int flags);
+    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll", SetLastError = true)] private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32.dll", SetLastError = true)] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll", SetLastError = true)] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+    [DllImport("gdi32.dll", SetLastError = true)] private static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll", SetLastError = true)] private static extern bool DeleteDC(IntPtr dc);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint(int x, int y)
