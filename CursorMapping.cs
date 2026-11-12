@@ -473,11 +473,10 @@ internal sealed class CursorOverlayWindow : Form
                 }
                 try
                 {
-                    var destination = new NativePoint(-32000, -32000);
                     var source = new NativePoint(0, 0);
                     var size = new NativeSize(_renderSize.Width, _renderSize.Height);
                     var blend = new BlendFunction { Operation = AcSrcOver, SourceConstantAlpha = 255, AlphaFormat = AcSrcAlpha };
-                    if (!UpdateLayeredWindow(Handle, screenDc, ref destination, ref size, memoryDc, ref source, 0, ref blend, UlwAlpha))
+                    if (!UpdateLayeredWindow(Handle, screenDc, IntPtr.Zero, ref size, memoryDc, ref source, 0, ref blend, UlwAlpha))
                         throw new Win32Exception(Marshal.GetLastWin32Error(), "無法更新透明映射游標。");
                 }
                 finally
@@ -502,7 +501,7 @@ internal sealed class CursorOverlayWindow : Form
     protected override void OnPaint(PaintEventArgs e) { }
 
     [DllImport("user32.dll", SetLastError = true)] private static extern bool DrawIconEx(IntPtr dc, int x, int y, IntPtr icon, int width, int height, uint stepIfAnimated, IntPtr flickerFreeBrush, uint flags);
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr destinationDc, ref NativePoint destination, ref NativeSize size, IntPtr sourceDc, ref NativePoint source, int colorKey, ref BlendFunction blend, int flags);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr destinationDc, IntPtr destination, ref NativeSize size, IntPtr sourceDc, ref NativePoint source, int colorKey, ref BlendFunction blend, int flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr GetDC(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError = true)] private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
     [DllImport("gdi32.dll", SetLastError = true)] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
