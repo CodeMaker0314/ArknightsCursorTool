@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -26,7 +25,9 @@ internal sealed class CursorMappingController : IDisposable
         _log = log;
         _cursor = cursor;
         _ownsCursor = ownsCursor;
-        _overlay = new CursorOverlayWindow(cursor, mappedSize);
+        var animation = AniCursorAnimation.TryLoadSystemArrow();
+        _overlay = new CursorOverlayWindow(cursor, mappedSize, animation);
+        if (animation is not null) _log($"已偵測 Windows 箭頭 ANI 指標，包含 {animation.StepCount} 個動畫步驟。");
         try
         {
             _ = _overlay.Handle;
@@ -84,6 +85,8 @@ internal sealed class CursorMappingController : IDisposable
         var overlayVisible = false;
         var lastX = int.MinValue;
         var lastY = int.MinValue;
+        var lastRenderedFrame = -1;
+        var animationClock = Stopwatch.StartNew();
         var lastProcessCheck = DateTime.MinValue;
         var cachedProcessId = 0u;
         var cachedIsGame = false;
@@ -197,6 +200,13 @@ internal sealed class CursorMappingController : IDisposable
                     overlayVisible = true;
                     lastX = x;
                     lastY = y;
+                }
+
+                var frame = _overlay.GetFrameIndex(animationClock.Elapsed);
+                if (frame != lastRenderedFrame)
+                {
+                    _overlay.RenderFrame(frame);
+                    lastRenderedFrame = frame;
                 }
 
                 Thread.Sleep(1);
@@ -383,16 +393,20 @@ internal sealed class CursorOverlayWindow : Form
     private const int HtTransparent = -1;
     private const int MaNoActivate = 3;
     private const int UlwAlpha = 0x00000002;
+    private const uint DiNormal = 0x0003;
     private const byte AcSrcOver = 0;
     private const byte AcSrcAlpha = 1;
 
     private readonly Cursor _cursor;
+    private readonly AniCursorAnimation? _animation;
+    private readonly Size _renderSize;
     public int HotSpotX { get; }
     public int HotSpotY { get; }
 
-    public CursorOverlayWindow(Cursor cursor, int mappedSize)
+    public CursorOverlayWindow(Cursor cursor, int mappedSize, AniCursorAnimation? animation)
     {
         _cursor = cursor;
+        _animation = animation;
         var source = cursor.Size;
         if (source.Width <= 0 || source.Height <= 0) source = new Size(32, 32);
         var hotspot = cursor.HotSpot;
@@ -400,11 +414,12 @@ internal sealed class CursorOverlayWindow : Form
         var height = mappedSize > 0 ? Math.Max(1, (int)Math.Round(source.Height * (double)width / source.Width)) : source.Height;
         HotSpotX = (int)Math.Round(hotspot.X * (double)width / source.Width);
         HotSpotY = (int)Math.Round(hotspot.Y * (double)height / source.Height);
+        _renderSize = new Size(width, height);
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         Location = new Point(-32000, -32000);
-        ClientSize = new Size(width, height);
+        ClientSize = _renderSize;
         TopMost = true;
     }
 
@@ -421,13 +436,23 @@ internal sealed class CursorOverlayWindow : Form
     }
 
     public void InitializeLayeredImage()
+        => RenderFrame(GetFrameIndex(TimeSpan.Zero));
+
+    public int GetFrameIndex(TimeSpan elapsed) => _animation?.GetFrameIndex(elapsed) ?? 0;
+
+    public void RenderFrame(int frameIndex)
     {
-        using var bitmap = new Bitmap(ClientSize.Width, ClientSize.Height, PixelFormat.Format32bppPArgb);
+        using var bitmap = new Bitmap(_renderSize.Width, _renderSize.Height, PixelFormat.Format32bppPArgb);
         using (var graphics = Graphics.FromImage(bitmap))
         {
             graphics.Clear(Color.Transparent);
-            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            _cursor.DrawStretched(graphics, new Rectangle(Point.Empty, ClientSize));
+            var graphicsHandle = graphics.GetHdc();
+            try
+            {
+                if (!DrawIconEx(graphicsHandle, 0, 0, _cursor.Handle, _renderSize.Width, _renderSize.Height, (uint)frameIndex, IntPtr.Zero, DiNormal))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "無法繪製 Windows 指標畫格。");
+            }
+            finally { graphics.ReleaseHdc(graphicsHandle); }
         }
 
         var screenDc = GetDC(IntPtr.Zero);
@@ -450,7 +475,7 @@ internal sealed class CursorOverlayWindow : Form
                 {
                     var destination = new NativePoint(-32000, -32000);
                     var source = new NativePoint(0, 0);
-                    var size = new NativeSize(ClientSize.Width, ClientSize.Height);
+                    var size = new NativeSize(_renderSize.Width, _renderSize.Height);
                     var blend = new BlendFunction { Operation = AcSrcOver, SourceConstantAlpha = 255, AlphaFormat = AcSrcAlpha };
                     if (!UpdateLayeredWindow(Handle, screenDc, ref destination, ref size, memoryDc, ref source, 0, ref blend, UlwAlpha))
                         throw new Win32Exception(Marshal.GetLastWin32Error(), "無法更新透明映射游標。");
@@ -476,6 +501,7 @@ internal sealed class CursorOverlayWindow : Form
     protected override void OnPaintBackground(PaintEventArgs e) { }
     protected override void OnPaint(PaintEventArgs e) { }
 
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool DrawIconEx(IntPtr dc, int x, int y, IntPtr icon, int width, int height, uint stepIfAnimated, IntPtr flickerFreeBrush, uint flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr destinationDc, ref NativePoint destination, ref NativeSize size, IntPtr sourceDc, ref NativePoint source, int colorKey, ref BlendFunction blend, int flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr GetDC(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError = true)] private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
